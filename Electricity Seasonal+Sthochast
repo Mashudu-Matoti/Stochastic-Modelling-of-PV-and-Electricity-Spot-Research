@@ -1,0 +1,257 @@
+# Load required library
+install.packages('GeneralizedHyperbolic')
+library(minpack.lm)
+library(readxl)
+# 1. LOAD AND PREPARE DATA
+getwd()
+setwd("C:/Users/scofi/Documents/RStats")
+Electricity = read_excel("electricity.xlsx")
+Electricity$Price_kWh = Electricity$Price/1000
+dates <- Electricity$Date
+prices <- Electricity$Price/1000
+
+# 2. LOG TRANSFORMATION (as in MATLAB code)
+log_prices <- log(prices)
+
+# 3. PREPARE TIME INDEX
+start_date <- min(dates)
+t <- as.numeric(difftime(dates, start_date, units = "days")) + 1
+
+# 4. DEFINE SEASONAL FUNCTION FOR LOG-PRICES
+seasonal_function <- function(t, alpha, gamma, tau) {
+  alpha + gamma * cos(2 * pi * (t + tau) / 365)
+}
+
+# 5. FIT MODEL TO LOG-PRICES
+start_params <- list(
+  alpha = mean(log_prices, na.rm = TRUE),
+  gamma = sd(log_prices, na.rm = TRUE) / 2,
+  tau = 0
+)
+
+nls_fit <- nlsLM(
+  log_prices ~ seasonal_function(t, alpha, gamma, tau),
+  start = start_params,
+  control = nls.lm.control(maxiter = 1000)
+)
+
+# 6. EXTRACT PARAMETERS
+coefficients <- coef(nls_fit)
+alpha_est <- coefficients["alpha"]
+gamma_est <- coefficients["gamma"]
+tau_est <- coefficients["tau"]
+
+# 7. CALCULATE FITTED VALUES (in log space)
+fitted_log_prices <- fitted(nls_fit)
+
+# 8. CALCULATE RESIDUALS (stochastic component)
+residuals <- log_prices - fitted_log_prices
+
+# 9. DISPLAY RESULTS
+cat("Estimated Parameter Values Using Nonlinear Least Squares (NLLS)\n")
+cat("==============================================================\n")
+cat(sprintf("α %.2f\n", alpha_est))
+cat(sprintf("γ %.2f\n", gamma_est))
+cat(sprintf("τ %.2f\n", tau_est))
+cat("\n")
+
+# 10. CREATE PLOTS
+
+# Plot 1: Log-prices with seasonal fit
+plot(dates, log_prices, type = "l", col = "blue", lwd = 1,
+     main = "Log Electricity Prices and Seasonal Fit",
+     xlab = "Date", 
+     ylab = "Log Price",
+     ylim = range(c(log_prices, fitted_log_prices), na.rm = TRUE))
+
+lines(dates, fitted_log_prices, col = "red", lwd = 2)
+legend("topright", 
+       legend = c("Log Observed Prices", "Fitted Seasonal Pattern"),
+       col = c("blue", "red"), 
+       lty = 1,
+       lwd = c(1, 2))
+
+# Plot 2: Original prices with back-transformed fit
+fitted_prices <- exp(fitted_log_prices)  # Convert back to original scale
+
+plot(dates, prices, type = "l", col = "blue", lwd = 1,
+     main = "Electricity Prices with Seasonal Fit (Original Scale)",
+     xlab = "Date", 
+     ylab = "Price (€/kWh)",
+     ylim = range(c(prices, fitted_prices), na.rm = TRUE))
+
+lines(dates, fitted_prices, col = "red", lwd = 2)
+legend("topright", 
+       legend = c("Observed Prices", "Fitted Seasonal Pattern"),
+       col = c("blue", "red"), 
+       lty = 1,
+       lwd = c(1, 2))
+
+# 11. GOODNESS OF FIT
+ss_res <- sum((log_prices - fitted_log_prices)^2, na.rm = TRUE)
+ss_tot <- sum((log_prices - mean(log_prices, na.rm = TRUE))^2, na.rm = TRUE)
+r_squared <- 1 - (ss_res / ss_tot)
+
+cat(sprintf("R-squared (log scale): %.4f\n", r_squared))
+cat(sprintf("Residual standard deviation: %.4f\n", sd(residuals)))
+
+# 12. INTERPRETATION
+cat("\nINTERPRETATION:\n")
+cat(sprintf("• Baseline level: exp(α) = exp(%.2f) = %.2f €/kWh\n", 
+            alpha_est, exp(alpha_est)))
+cat(sprintf("• Seasonal amplitude: ±%.2f in log-space\n", gamma_est))
+cat(sprintf("• Phase shift: τ = %.0f days (peak timing)\n", tau_est))
+
+# STOCHASTIC COMPONENT MODELING - ORNSTEIN-UHLENBECK PROCESS
+
+# CORRECT IMPLEMENTATION: SEASONAL + STOCHASTIC MODELING
+
+# 1. FIRST: Fit and remove deterministic seasonal component
+library(minpack.lm)
+
+# Seasonal function from Lucia and Schwartz (2002)
+seasonal_function <- function(t, alpha, gamma, tau) {
+  alpha + gamma * cos(2 * pi * (t + tau) / 365)
+}
+
+# Fit seasonal model to log-prices
+fit_seasonal_model <- function(prices, dates) {
+  # Log transformation
+  log_prices <- log(prices)
+  
+  # Time index
+  start_date <- min(dates)
+  t <- as.numeric(difftime(dates, start_date, units = "days")) + 1
+  
+  # Initial parameters
+  start_params <- list(
+    alpha = mean(log_prices, na.rm = TRUE),
+    gamma = sd(log_prices, na.rm = TRUE) / 2,
+    tau = 0
+  )
+  
+  # Fit seasonal model
+  nls_fit <- nlsLM(
+    log_prices ~ seasonal_function(t, alpha, gamma, tau),
+    start = start_params,
+    control = nls.lm.control(maxiter = 1000)
+  )
+  
+  coefficients <- coef(nls_fit)
+  fitted_log_prices <- fitted(nls_fit)
+  
+  # Calculate stochastic component Y(t) = log(Price) - Λ(t)
+  Y_t <- log_prices - fitted_log_prices
+  
+  return(list(
+    seasonal_coef = coefficients,
+    fitted_seasonal = fitted_log_prices,
+    stochastic_component = Y_t,
+    dates = dates,
+    log_prices = log_prices
+  ))
+}
+
+# 2. SECOND: Model stochastic component with OU process
+estimate_ou_parameters <- function(Y_t, delta_t = 1) {
+  n <- length(Y_t)
+  
+  # MLE for OU parameters
+  sum_yt_yt1 <- sum(Y_t[2:n] * Y_t[1:(n-1)])
+  sum_yt1_sq <- sum(Y_t[1:(n-1)]^2)
+  
+  alpha_hat <- - (1 / delta_t) * log(sum_yt_yt1 / sum_yt1_sq)
+  
+  sum_sq_diff <- 0
+  for (t in 2:n) {
+    predicted <- Y_t[t-1] * exp(-alpha_hat * delta_t)
+    actual <- Y_t[t]
+    sum_sq_diff <- sum_sq_diff + (actual - predicted)^2
+  }
+  
+  sigma_sq_hat <- (2 * alpha_hat / (n-1)) * sum_sq_diff / (1 - exp(-2 * alpha_hat * delta_t))
+  sigma_hat <- sqrt(sigma_sq_hat)
+  
+  half_life <- log(2) / alpha_hat
+  
+  return(list(
+    alpha = alpha_hat,
+    sigma = sigma_hat,
+    sigma_sq = sigma_sq_hat,
+    half_life = half_life
+  ))
+}
+
+# 3. MAIN EXECUTION
+# Fit seasonal model and extract stochastic component
+decomposition <- fit_seasonal_model(Electricity$Price_kWh, Electricity$Date)
+
+# Get the stochastic component Y(t)
+Y_t <- decomposition$stochastic_component
+
+# Fit OU process to stochastic component
+ou_results <- estimate_ou_parameters(Y_t)
+
+# 4. RESULTS
+cat("DETERMINISTIC SEASONAL COMPONENT PARAMETERS\n")
+cat("===========================================\n")
+cat(sprintf("α (baseline): %.4f\n", decomposition$seasonal_coef["alpha"]))
+cat(sprintf("γ (amplitude): %.4f\n", decomposition$seasonal_coef["gamma"]))
+cat(sprintf("τ (phase shift): %.2f days\n", decomposition$seasonal_coef["tau"]))
+cat("\n")
+
+cat("STOCHASTIC COMPONENT PARAMETERS (OU PROCESS)\n")
+cat("============================================\n")
+cat(sprintf("α (mean reversion): %.4f\n", ou_results$alpha))
+cat(sprintf("σ (volatility): %.4f\n", ou_results$sigma))
+cat(sprintf("Half-life: %.1f days\n", ou_results$half_life))
+cat("\n")
+
+# 5. DIAGNOSTIC PLOTS
+
+# Plot 1: Full decomposition
+par(mfrow = c(2, 2))
+
+# Original prices with seasonal fit
+fitted_prices <- exp(decomposition$fitted_seasonal)
+plot(decomposition$dates, Electricity$Price_kWh, type = "l", col = "gray",
+     main = "Original Prices with Seasonal Fit",
+     xlab = "Date", ylab = "Price (€/kWh)")
+lines(decomposition$dates, fitted_prices, col = "red", lwd = 2)
+
+# Stochastic component Y(t)
+plot(decomposition$dates, Y_t, type = "l", col = "blue",
+     main = "Stochastic Component Y(t)",
+     xlab = "Date", ylab = "Y(t)")
+abline(h = 0, col = "red", lty = 2)
+
+# ACF of stochastic component
+acf(Y_t, main = "ACF of Stochastic Component",
+    lag.max = 50, col = "darkgreen")
+
+# Density of stochastic component
+dens <- density(Y_t, na.rm = TRUE)
+plot(dens, main = "Density of Y(t) with Normal Fit",
+     xlab = "Y(t)", ylab = "Density", col = "blue", lwd = 2)
+x_norm <- seq(min(Y_t), max(Y_t), length = 1000)
+lines(x_norm, dnorm(x_norm, mean = mean(Y_t), sd = sd(Y_t)), 
+      col = "red", lwd = 2, lty = 2)
+
+par(mfrow = c(1, 1))
+
+# 6. MODEL VALIDATION
+
+# Check if stochastic component has zero mean (should be centered around seasonal fit)
+cat("STOCHASTIC COMPONENT VALIDATION\n")
+cat("===============================\n")
+cat(sprintf("Mean of Y(t): %.6f (should be near zero)\n", mean(Y_t)))
+cat(sprintf("Std Dev of Y(t): %.6f\n", sd(Y_t)))
+
+# Normality test
+shapiro_test <- shapiro.test(Y_t)
+cat(sprintf("Shapiro-Wilk normality p-value: %.4f\n", shapiro_test$p.value))
+
+# Ljung-Box test for remaining autocorrelation
+lb_test <- Box.test(Y_t, lag = 20, type = "Ljung-Box")
+cat(sprintf("Ljung-Box autocorrelation p-value: %.4f\n", lb_test$p.value))
+
