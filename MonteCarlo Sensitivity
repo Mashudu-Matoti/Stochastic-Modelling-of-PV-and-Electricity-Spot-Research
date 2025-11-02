@@ -1,0 +1,92 @@
+library(skewt)  # For skewed-normal distribution
+library(dplyr)
+library(ggplot2)
+
+set.seed(123)
+
+# Monte Carlo settings
+n_sim <- 100000
+T <- 10
+dates <- c("2023-01-01", "2023-04-01", "2023-07-01", "2023-10-01")
+
+# PV skewed-normal parameters
+xi_PV <- 1.1222
+omega_PV <- 1.4590
+alpha_PV <- -3.9064
+
+# Spot price OU parameters
+alpha_S <- 0.0174
+sigma_S <- 0.291
+
+# Seasonal values for PV and spot
+Lambda_0 <- c(2.3, 3.6, 3.75, 2.6)
+Lambda_T <- c(2.3, 3.6, 3.75, 2.6)
+U_0 <- c(0.088, 0.087, 0.086, 0.102)
+U_T <- c(0.102, 0.087, 0.086, 0.102)
+
+# Correlation sensitivity values to test
+rho_values <- c(-0.01, -0.0057, 0, 0.005, 0.01)
+
+# Storage for results
+results <- data.frame()
+
+for (rho_hat in rho_values) {
+  for (i in 1:4) {
+    # Initial values
+    PV0 <- exp(Lambda_0[i])
+    S0 <- -rho_hat * Lambda_0[i] + U_0[i]
+    
+    # Strikes
+    L <- exp(Lambda_T[i])
+    K <- -rho_hat * Lambda_T[i] + U_T[i]
+    
+    # Simulate PV paths (skewed-normal)
+    skew_rvs <- rmsn(n = n_sim * T, xi = xi_PV, Omega = omega_PV, alpha = alpha_PV)
+    PV_paths <- matrix(skew_rvs, ncol = T, nrow = n_sim)
+    PV_paths <- PV0 * exp(apply(PV_paths, 1, cumsum) / 10)  # scaled increments
+    PV_T_sim <- PV_paths[, T]
+    
+    
+    # Simulate spot price paths (OU + correlation term)
+    S_paths <- matrix(0, nrow = n_sim, ncol = T)
+    S_paths[, 1] <- S0
+    for (t in 2:T) {
+      dB <- rnorm(n_sim, 0, 1)
+      S_paths[, t] <- S_paths[, t-1] + alpha_S * (0 - S_paths[, t-1]) + sigma_S * dB - rho_hat * log(PV_paths[, t])
+    }
+    S_T_sim <- S_paths[, T]
+    
+    # Calculate payoffs
+    PV_call <- pmax(PV_T_sim - L, 0)
+    Spot_put <- pmax(K - S_T_sim, 0)
+    Quanto <- PV_call * Spot_put
+    
+    # Store mean payoffs
+    results <- rbind(results, data.frame(
+      Date = dates[i],
+      Rho = rho_hat,
+      PV_Call = mean(PV_call),
+      Spot_Put = mean(Spot_put),
+      Quanto = mean(Quanto)
+    ))
+  }
+}
+
+# View results
+print(results)
+
+# Optional: visualize sensitivity
+ggplot(results, aes(x = Rho, y = PV_Call, color = Date)) +
+  geom_line() + geom_point() +
+  labs(title = "PV Call Mean Payoff Sensitivity to Correlation",
+       x = "Rho", y = "PV Call Mean Payoff")
+
+ggplot(results, aes(x = Rho, y = Spot_Put, color = Date)) +
+  geom_line() + geom_point() +
+  labs(title = "Spot Put Mean Payoff Sensitivity to Correlation",
+       x = "Rho", y = "Spot Put Mean Payoff")
+
+ggplot(results, aes(x = Rho, y = Quanto, color = Date)) +
+  geom_line() + geom_point() +
+  labs(title = "Quanto Option Mean Payoff Sensitivity to Correlation",
+       x = "Rho", y = "Quanto Mean Payoff")
