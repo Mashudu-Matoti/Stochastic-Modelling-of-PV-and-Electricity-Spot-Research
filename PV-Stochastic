@@ -1,0 +1,728 @@
+# More accurate solar position calculation
+install.packages('sn')
+library(oce)
+library(sn)
+
+calculate_accurate_irradiance <- function(Date, lat, lon) {
+  # Create datetime at solar noon
+  datetime <- as.POSIXct(paste(Date, "12:00:00"), tz = "Europe/Lisbon")
+  
+  # Calculate accurate solar position
+  solar_angle <- sunAngle(datetime, lat, lon)
+  
+  # Calculate zenith angle and air mass
+  zenith_angle <- 90 - solar_angle$altitude
+  air_mass <- 1 / cos(zenith_angle * pi / 180)
+  air_mass[air_mass < 1] <- 1
+  air_mass[zenith_angle >= 90] <- NA
+  
+  # Calculate theoretical irradiance
+  I_t <- 1.353 * (0.7 ^ (air_mass ^ 0.678))
+  
+  return(data.frame(Date = Date, I_t = I_t))
+}
+
+# Re-prepare data with accurate calculation
+prepare_accurate_data <- function(city_data, city_name) {
+  lat <- cities[[city_name]]$lat
+  lon <- cities[[city_name]]$lon
+  
+  irradiance_data <- calculate_accurate_irradiance(city_data$Date, lat, lon)
+  
+  city_data %>%
+    left_join(irradiance_data, by = "Date") %>%
+    filter(PV > 0, !is.na(I_t)) %>%
+    mutate(ln_PV = log(PV),
+           ln_I = log(I_t),
+           time_index = as.numeric(difftime(Date, min(Date), units = "days"))) %>%
+    filter(complete.cases(ln_PV, time_index, ln_I))
+}
+
+# Try with accurate calculation
+Faro_accurate <- prepare_accurate_data(Faro_imputed, "Faro")
+Tavira_accurate <- prepare_accurate_data(Tavira_imputed, "Tavira")
+Loule_accurate <- prepare_accurate_data(Loule_imputed, "Loule")
+
+# Refit models
+Faro_model2 <- fit_model_with_pvalues(Faro_accurate, "Faro")
+Tavira_model2 <- fit_model_with_pvalues(Tavira_accurate, "Tavira")
+Loule_model2 <- fit_model_with_pvalues(Loule_accurate, "Loule")
+
+print_results(Faro_model2)
+print_results(Tavira_model2)
+print_results(Loule_model2)
+
+# Create the time series plot with fitted function
+create_seasonal_plot <- function(city_data, city_name, model_results) {
+  # Calculate the fitted seasonal component Λ(t)
+  city_data$Lambda <- model_results$a + model_results$b * city_data$time_index + model_results$c * city_data$ln_I
+  
+  ggplot(city_data, aes(x = Date)) +
+    # Plot actual PV production in black
+    geom_line(aes(y = ln_PV, color = "ln(PV(t))"), linewidth = 0.7) +
+    # Plot fitted seasonal function in red
+    geom_line(aes(y = Lambda, color = "c⋅ln(I(t))"), linewidth = 0.7) +
+    labs(
+      title = paste("Time Series of 12pm Production -", city_name),
+      subtitle = "Black: ln(PV(t)), Red: Seasonal Component c⋅ln(I(t))",
+      x = "Date",
+      y = "Value",
+      color = "Series"
+    ) +
+    scale_color_manual(
+      values = c("ln(PV(t))" = "black", "c⋅ln(I(t))" = "red"),
+      labels = c("ln(PV(t))", "c⋅ln(I(t))")
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "top",
+      legend.title = element_blank(),
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 10)
+    )
+}
+
+# Create plots for each city
+faro_plot <- create_seasonal_plot(Faro_accurate, "Faro", Faro_model2)
+tavira_plot <- create_seasonal_plot(Tavira_accurate, "Tavira", Tavira_model2)
+loule_plot <- create_seasonal_plot(Loule_accurate, "Loulé", Loule_model2)
+
+# Display the plots
+print(faro_plot)
+print(tavira_plot)
+print(loule_plot)
+
+# Optional: Save the plots
+ggsave("faro_seasonal_plot.png", faro_plot, width = 10, height = 6, dpi = 300)
+ggsave("tavira_seasonal_plot.png", tavira_plot, width = 10, height = 6, dpi = 300)
+ggsave("loule_seasonal_plot.png", loule_plot, width = 10, height = 6, dpi = 300)
+
+# Calculate the stochastic component X(t) = ln(PV(t)) - Λ(t)
+Faro_stochastic <- Faro_accurate %>%
+  mutate(
+    Lambda = Faro_model2$a + Faro_model2$b * time_index + Faro_model2$c * ln_I,
+    X = ln_PV - Lambda
+  )
+
+Tavira_stochastic <- Tavira_accurate %>%
+  mutate(
+    Lambda = Tavira_model2$a + Tavira_model2$b * time_index + Tavira_model2$c * ln_I,
+    X = ln_PV - Lambda
+  )
+
+Loule_stochastic <- Loule_accurate %>%
+  mutate(
+    Lambda = Loule_model2$a + Loule_model2$b * time_index + Loule_model2$c * ln_I,
+    X = ln_PV - Lambda
+  )
+
+# Create and save deseasonalized ACF/PACF plots
+create_deseasonalized_acf_pacf <- function(city_data, city_name, filename) {
+  png(filename, width = 1000, height = 500, res = 150)
+  par(mfrow = c(1, 2))
+  
+  # ACF of deseasonalized data X(t)
+  acf(na.omit(city_data$X), 
+      main = paste("ACF of X(t) -", city_name),
+      lag.max = 50, col = "blue", lwd = 2)
+  
+  # PACF of deseasonalized data X(t)
+  pacf(na.omit(city_data$X), 
+       main = paste("PACF of X(t) -", city_name),
+       lag.max = 50, col = "red", lwd = 2)
+  
+  dev.off()
+  par(mfrow = c(1, 1))
+  cat("Saved:", filename, "\n")
+}
+
+# Save plots for all cities
+create_deseasonalized_acf_pacf(Faro_stochastic, "Faro", "faro_deseasonalized_acf_pacf.png")
+create_deseasonalized_acf_pacf(Tavira_stochastic, "Tavira", "tavira_deseasonalized_acf_pacf.png")
+create_deseasonalized_acf_pacf(Loule_stochastic, "Loulé", "loule_deseasonalized_acf_pacf.png")
+
+cat("Deseasonalized ACF/PACF plots saved!\n")
+
+
+# Fit AR(3) model to the stochastic component X(t) for each city
+fit_ar3_model <- function(city_data, city_name) {
+  # Remove NA values for AR model
+  x_clean <- na.omit(city_data$X)
+  
+  # Fit AR(3) model
+  ar_model <- ar(x_clean, order.max = 3, method = "ols")
+  
+  cat("\n=== AR(3) Model for", city_name, "===\n")
+  cat("AR coefficients (β1, β2, β3):\n")
+  print(round(ar_model$ar, 6))
+  cat("Intercept:", round(ar_model$x.mean, 6), "\n")
+  cat("Order:", ar_model$order, "\n")
+  
+  return(ar_model)
+}
+
+# Fit AR(3) models for all cities
+faro_ar3 <- fit_ar3_model(Faro_stochastic, "Faro")
+tavira_ar3 <- fit_ar3_model(Tavira_stochastic, "Tavira")
+loule_ar3 <- fit_ar3_model(Loule_stochastic, "Loulé")
+
+# Alternative method using arima() for more detailed output
+fit_ar3_detailed <- function(city_data, city_name) {
+  x_clean <- na.omit(city_data$X)
+  
+  # Fit AR(3) using arima function
+  arima_model <- arima(x_clean, order = c(3, 0, 0), method = "CSS")
+  
+  cat("\n=== AR(3) Detailed Results for", city_name, "===\n")
+  print(arima_model)
+  
+  # Extract coefficients and standard errors
+  coef_summary <- data.frame(
+    Parameter = names(arima_model$coef),
+    Estimate = round(arima_model$coef, 6),
+    Std_Error = round(sqrt(diag(arima_model$var.coef)), 6)
+  )
+  
+  print(coef_summary)
+  return(arima_model)
+}
+
+# Get detailed AR(3) results
+faro_ar3_detailed <- fit_ar3_detailed(Faro_stochastic, "Faro")
+tavira_ar3_detailed <- fit_ar3_detailed(Tavira_stochastic, "Tavira")
+loule_ar3_detailed <- fit_ar3_detailed(Loule_stochastic, "Loulé")
+
+# Create summary table of AR(3) coefficients
+cat("\n=== SUMMARY OF AR(3) COEFFICIENTS ===\n")
+ar3_summary <- data.frame(
+  City = c("Faro", "Tavira", "Loulé"),
+  β1 = c(faro_ar3$ar[1], tavira_ar3$ar[1], loule_ar3$ar[1]),
+  β2 = c(faro_ar3$ar[2], tavira_ar3$ar[2], loule_ar3$ar[2]),
+  β3 = c(faro_ar3$ar[3], tavira_ar3$ar[3], loule_ar3$ar[3]),
+  Intercept = c(faro_ar3$x.mean, tavira_ar3$x.mean, loule_ar3$x.mean)
+)
+
+print(ar3_summary)
+
+# Fit AR(3) model with p-values for each city
+fit_ar3_with_pvalues <- function(city_data, city_name) {
+  # Remove NA values for AR model
+  x_clean <- na.omit(city_data$X)
+  
+  # Fit AR(3) using arima function
+  arima_model <- arima(x_clean, order = c(3, 0, 0), method = "CSS")
+  
+  # Calculate t-values and p-values
+  coefficients <- arima_model$coef
+  std_errors <- sqrt(diag(arima_model$var.coef))
+  t_values <- coefficients / std_errors
+  p_values <- 2 * (1 - pnorm(abs(t_values)))
+  
+  # Create results table
+  results <- data.frame(
+    Parameter = names(coefficients),
+    Estimate = round(coefficients, 6),
+    Std_Error = round(std_errors, 6),
+    t_value = round(t_values, 4),
+    p_value = round(p_values, 6)
+  )
+  
+  cat("\n=== AR(3) Model for", city_name, "===\n")
+  print(results)
+  
+  return(list(model = arima_model, results = results))
+}
+
+# Fit AR(3) models with p-values for all cities
+faro_ar3_pvals <- fit_ar3_with_pvalues(Faro_stochastic, "Faro")
+tavira_ar3_pvals <- fit_ar3_with_pvalues(Tavira_stochastic, "Tavira")
+loule_ar3_pvals <- fit_ar3_with_pvalues(Loule_stochastic, "Loulé")
+
+# Extract and analyze residuals from AR(3) models
+analyze_ar3_residuals <- function(ar3_model, city_name) {
+  # Extract residuals
+  residuals <- residuals(ar3_model$model)
+  
+  cat("\n=== RESIDUAL ANALYSIS FOR", city_name, "===\n")
+  
+  # Basic statistics
+  cat("Residuals Summary:\n")
+  print(summary(residuals))
+  cat("Standard Deviation:", round(sd(residuals), 6), "\n")
+  
+  # Test for normality
+  cat("\nNormality Tests:\n")
+  shapiro_test <- shapiro.test(residuals)
+  cat("Shapiro-Wilk p-value:", round(shapiro_test$p.value, 6), "\n")
+  
+  # Test for autocorrelation in residuals
+  cat("\nLjung-Box Test for Residual Autocorrelation:\n")
+  lb_test <- Box.test(residuals, lag = 20, type = "Ljung-Box")
+  cat("Ljung-Box p-value:", round(lb_test$p.value, 6), "\n")
+  
+  # Check if residuals are i.i.d. (p > 0.05 indicates no significant autocorrelation)
+  if(lb_test$p.value > 0.05) {
+    cat("Conclusion: Residuals appear to be i.i.d. (no significant autocorrelation)\n")
+  } else {
+    cat("Conclusion: Residuals show significant autocorrelation\n")
+  }
+  
+  return(residuals)
+}
+
+# Analyze residuals for all cities
+faro_residuals <- analyze_ar3_residuals(faro_ar3_pvals, "Faro")
+tavira_residuals <- analyze_ar3_residuals(tavira_ar3_pvals, "Tavira")
+loule_residuals <- analyze_ar3_residuals(loule_ar3_pvals, "Loulé")
+
+# Create and save the requested plots: Density, Q-Q, and ACF of squared residuals
+plot_requested_diagnostics <- function(residuals, city_name, filename) {
+  png(filename, width = 1200, height = 400, res = 150)
+  par(mfrow = c(1, 3))
+  
+  # 1. Density plot of residuals
+  plot(density(residuals), main = paste("Density Plot -", city_name),
+       xlab = "Residuals ε(t)", col = "blue", lwd = 2)
+  abline(v = 0, col = "red", lty = 2)
+  
+  # 2. Q-Q plot for normality
+  qqnorm(residuals, main = paste("Q-Q Plot -", city_name))
+  qqline(residuals, col = "red")
+  
+  # 3. ACF of squared residuals (to check for volatility clustering)
+  squared_residuals <- residuals^2
+  acf(squared_residuals, main = paste("ACF of Squared Residuals -", city_name),
+      lag.max = 40, col = "darkgreen", lwd = 2)
+  
+  dev.off()
+  par(mfrow = c(1, 1))
+  cat("Saved:", filename, "\n")
+}
+
+# Create the requested diagnostic plots for all cities
+plot_requested_diagnostics(faro_residuals, "Faro", "faro_ar3_requested_plots.png")
+plot_requested_diagnostics(tavira_residuals, "Tavira", "tavira_ar3_requested_plots.png")
+plot_requested_diagnostics(loule_residuals, "Loulé", "loule_ar3_requested_plots.png")
+
+# Also create individual plots for each type
+create_individual_plots <- function(residuals, city_name) {
+  # Density plot
+  png(paste0(city_name, "_density_plot.png"), width = 600, height = 500, res = 150)
+  plot(density(residuals), main = paste("Density of Residuals -", city_name),
+       xlab = "Residuals ε(t)", col = "blue", lwd = 2)
+  abline(v = 0, col = "red", lty = 2)
+  dev.off()
+  
+  # Q-Q plot
+  png(paste0(city_name, "_qq_plot.png"), width = 600, height = 500, res = 150)
+  qqnorm(residuals, main = paste("Q-Q Plot -", city_name))
+  qqline(residuals, col = "red")
+  dev.off()
+  
+  # ACF of squared residuals
+  png(paste0(city_name, "_acf_squared_residuals.png"), width = 600, height = 500, res = 150)
+  squared_residuals <- residuals^2
+  acf(squared_residuals, main = paste("ACF of Squared Residuals -", city_name),
+      lag.max = 40, col = "darkgreen", lwd = 2)
+  dev.off()
+  
+  cat("Saved individual plots for", city_name, "\n")
+}
+
+# Create individual plots for all cities
+create_individual_plots(faro_residuals, "faro")
+create_individual_plots(tavira_residuals, "tavira")
+create_individual_plots(loule_residuals, "loule")
+
+cat("\nAll requested diagnostic plots have been saved to your working directory:\n")
+cat(getwd(), "\n")
+
+# List the saved files
+cat("\nSaved files:\n")
+requested_files <- list.files(pattern = "density|qq|squared|requested")
+print(requested_files)
+
+# Summary table of residual properties
+cat("\n=== RESIDUAL PROPERTIES SUMMARY ===\n")
+residual_summary <- data.frame(
+  City = c("Faro", "Tavira", "Loulé"),
+  Mean = c(mean(faro_residuals), mean(tavira_residuals), mean(loule_residuals)),
+  SD = c(sd(faro_residuals), sd(tavira_residuals), sd(loule_residuals)),
+  Shapiro_p = c(
+    shapiro.test(faro_residuals)$p.value,
+    shapiro.test(tavira_residuals)$p.value,
+    shapiro.test(loule_residuals)$p.value
+  ),
+  LjungBox_p = c(
+    Box.test(faro_residuals, lag = 20)$p.value,
+    Box.test(tavira_residuals, lag = 20)$p.value,
+    Box.test(loule_residuals, lag = 20)$p.value
+  )
+)
+
+print(residual_summary)
+
+# Function to prepare weekly averaged squared residuals
+prepare_weekly_squared_residuals <- function(city_data, residuals, city_name) {
+  # Create a data frame with dates and squared residuals
+  residual_data <- data.frame(
+    Date = city_data$Date[1:length(residuals)],
+    squared_residuals = residuals^2
+  )
+  
+  # Add year and week numbers
+  residual_data <- residual_data %>%
+    mutate(
+      Year = year(Date),
+      Week = week(Date),
+      DayOfWeek = wday(Date, label = TRUE)
+    )
+  
+  # Group by year and week, calculate weekly averages
+  weekly_avg <- residual_data %>%
+    group_by(Year, Week) %>%
+    summarise(
+      avg_squared_residual = mean(squared_residuals, na.rm = TRUE),
+      Thursday_Date = Date[which(DayOfWeek == "Thu")[1]],  # Get Thursday of the week
+      .groups = 'drop'
+    ) %>%
+    filter(!is.na(Thursday_Date)) %>%
+    mutate(
+      t = as.numeric(difftime(Thursday_Date, min(Thursday_Date), units = "days")) + 1,
+      Group = Week
+    )
+  
+  cat("\n=== Weekly Squared Residuals for", city_name, "===\n")
+  cat("Number of weekly observations:", nrow(weekly_avg), "\n")
+  cat("Date range:", as.character(min(weekly_avg$Thursday_Date)), "to", 
+      as.character(max(weekly_avg$Thursday_Date)), "\n")
+  
+  return(weekly_avg)
+}
+
+# Prepare weekly data for all cities
+faro_weekly <- prepare_weekly_squared_residuals(Faro_stochastic, faro_residuals, "Faro")
+tavira_weekly <- prepare_weekly_squared_residuals(Tavira_stochastic, tavira_residuals, "Tavira")
+loule_weekly <- prepare_weekly_squared_residuals(Loule_stochastic, loule_residuals, "Loulé")
+
+# Define the Fourier volatility function (L=1)
+fourier_volatility <- function(t, b1, b2, b3) {
+  # σ²(t) = b1 + b2*cos(2πt/365) + b3*sin(2πt/365)
+  b1 + b2 * cos(2 * pi * t / 365) + b3 * sin(2 * pi * t / 365)
+}
+
+# Fit the Fourier volatility model using nonlinear least squares
+fit_fourier_volatility <- function(weekly_data, city_name) {
+  # Initial parameter guesses
+  start_params <- list(
+    b1 = mean(weekly_data$avg_squared_residual),
+    b2 = 0.1,
+    b3 = 0.1
+  )
+  
+  # Fit using nls
+  fourier_fit <- nls(
+    avg_squared_residual ~ fourier_volatility(t, b1, b2, b3),
+    data = weekly_data,
+    start = start_params,
+    control = nls.control(maxiter = 1000, warnOnly = TRUE)
+  )
+  
+  # Get coefficients and summary
+  coefficients <- coef(fourier_fit)
+  summary_fit <- summary(fourier_fit)
+  
+  cat("\n=== Fourier Volatility Model for", city_name, "===\n")
+  print(summary_fit)
+  
+  # Calculate R-squared
+  fitted_values <- fitted(fourier_fit)
+  ss_res <- sum((weekly_data$avg_squared_residual - fitted_values)^2)
+  ss_tot <- sum((weekly_data$avg_squared_residual - mean(weekly_data$avg_squared_residual))^2)
+  r_squared <- 1 - (ss_res / ss_tot)
+  
+  cat("R-squared:", round(r_squared, 4), "\n")
+  
+  return(list(
+    model = fourier_fit,
+    coefficients = coefficients,
+    summary = summary_fit,
+    r_squared = r_squared,
+    weekly_data = weekly_data
+  ))
+}
+
+# Fit Fourier volatility models for all cities
+faro_volatility <- fit_fourier_volatility(faro_weekly, "Faro")
+tavira_volatility <- fit_fourier_volatility(tavira_weekly, "Tavira")
+loule_volatility <- fit_fourier_volatility(loule_weekly, "Loulé")
+
+# Create continuous plots of average squared residuals with fitted Fourier curve
+plot_volatility_fit_continuous <- function(volatility_results, city_name, filename) {
+  weekly_data <- volatility_results$weekly_data
+  fitted_values <- fitted(volatility_results$model)
+  
+  # Create a continuous time series for smooth plotting
+  continuous_dates <- seq(min(weekly_data$Thursday_Date), 
+                          max(weekly_data$Thursday_Date), 
+                          by = "day")
+  continuous_t <- as.numeric(difftime(continuous_dates, 
+                                      min(weekly_data$Thursday_Date), 
+                                      units = "days")) + 1
+  
+  # Calculate continuous fitted values
+  coefs <- volatility_results$coefficients
+  continuous_fitted <- fourier_volatility(continuous_t, coefs["b1"], coefs["b2"], coefs["b3"])
+  
+  png(filename, width = 1000, height = 600, res = 150)
+  
+  # Plot continuous fitted curve first (as background)
+  plot(continuous_dates, continuous_fitted,
+       type = "l", col = "red", lwd = 2,
+       main = paste("Weekly Averaged Squared Residuals with Fourier Fit -", city_name),
+       xlab = "Date", ylab = "Average Squared Residuals",
+       ylim = range(c(weekly_data$avg_squared_residual, continuous_fitted)))
+  
+  # Add weekly averages as connected lines
+  lines(weekly_data$Thursday_Date, weekly_data$avg_squared_residual,
+        type = "o", pch = 19, col = "blue", lwd = 1.5, cex = 0.8)
+  
+  # Add legend
+  legend("topright", 
+         legend = c("Weekly Average", "Fourier Fit (L=1)"),
+         col = c("blue", "red"), 
+         pch = c(19, NA), 
+         lty = c(1, 1),
+         lwd = c(1.5, 2))
+  
+  # Add R-squared to plot
+  r_sq_text <- paste("R² =", round(volatility_results$r_squared, 3))
+  text(min(weekly_data$Thursday_Date), max(weekly_data$avg_squared_residual),
+       r_sq_text, pos = 4, col = "darkgreen")
+  
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create continuous volatility fit plots for all cities
+plot_volatility_fit_continuous(faro_volatility, "Faro", "faro_volatility_fit_continuous.png")
+plot_volatility_fit_continuous(tavira_volatility, "Tavira", "tavira_volatility_fit_continuous.png")
+plot_volatility_fit_continuous(loule_volatility, "Loulé", "loule_volatility_fit_continuous.png")
+
+# Alternative version with just lines (no points)
+plot_volatility_fit_lines_only <- function(volatility_results, city_name, filename) {
+  weekly_data <- volatility_results$weekly_data
+  fitted_values <- fitted(volatility_results$model)
+  
+  # Create a continuous time series for smooth plotting
+  continuous_dates <- seq(min(weekly_data$Thursday_Date), 
+                          max(weekly_data$Thursday_Date), 
+                          by = "day")
+  continuous_t <- as.numeric(difftime(continuous_dates, 
+                                      min(weekly_data$Thursday_Date), 
+                                      units = "days")) + 1
+  
+  # Calculate continuous fitted values
+  coefs <- volatility_results$coefficients
+  continuous_fitted <- fourier_volatility(continuous_t, coefs["b1"], coefs["b2"], coefs["b3"])
+  
+  png(filename, width = 1000, height = 600, res = 150)
+  
+  # Plot weekly averages as solid line
+  plot(weekly_data$Thursday_Date, weekly_data$avg_squared_residual,
+       type = "l", col = "blue", lwd = 2,
+       main = paste("Weekly Averaged Squared Residuals with Fourier Fit -", city_name),
+       xlab = "Date", ylab = "Average Squared Residuals",
+       ylim = range(c(weekly_data$avg_squared_residual, continuous_fitted)))
+  
+  # Add continuous fitted curve
+  lines(continuous_dates, continuous_fitted, col = "red", lwd = 2, lty = 2)
+  
+  # Add legend
+  legend("topright", 
+         legend = c("Weekly Average", "Fourier Fit (L=1)"),
+         col = c("blue", "red"), 
+         lty = c(1, 2),
+         lwd = 2)
+  
+  # Add R-squared to plot
+  r_sq_text <- paste("R² =", round(volatility_results$r_squared, 3))
+  text(min(weekly_data$Thursday_Date), max(weekly_data$avg_squared_residual),
+       r_sq_text, pos = 4, col = "darkgreen")
+  
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create lines-only plots for all cities
+plot_volatility_fit_lines_only(faro_volatility, "Faro", "faro_volatility_fit_lines.png")
+plot_volatility_fit_lines_only(tavira_volatility, "Tavira", "tavira_volatility_fit_lines.png")
+plot_volatility_fit_lines_only(loule_volatility, "Loulé", "loule_volatility_fit_lines.png")
+
+# Create summary table of Fourier coefficients
+cat("\n=== FOURIER VOLATILITY COEFFICIENTS SUMMARY ===\n")
+volatility_summary <- data.frame(
+  City = c("Faro", "Tavira", "Loulé"),
+  b1 = c(faro_volatility$coefficients["b1"], 
+         tavira_volatility$coefficients["b1"], 
+         loule_volatility$coefficients["b1"]),
+  b2 = c(faro_volatility$coefficients["b2"], 
+         tavira_volatility$coefficients["b2"], 
+         loule_volatility$coefficients["b2"]),
+  b3 = c(faro_volatility$coefficients["b3"], 
+         tavira_volatility$coefficients["b3"], 
+         loule_volatility$coefficients["b3"]),
+  R_squared = c(faro_volatility$r_squared, 
+                tavira_volatility$r_squared, 
+                loule_volatility$r_squared)
+)
+
+print(volatility_summary)
+
+# Load required package for skewed normal distribution
+library(sn)
+
+# Calculate standardized residuals
+calculate_standardized_residuals <- function(city_data, residuals, volatility_results) {
+  daily_data <- data.frame(
+    Date = city_data$Date[1:length(residuals)],
+    t = as.numeric(difftime(city_data$Date[1:length(residuals)], 
+                            min(city_data$Date[1:length(residuals)]), units = "days")) + 1
+  )
+  
+  coefs <- volatility_results$coefficients
+  daily_volatility <- sqrt(fourier_volatility(daily_data$t, coefs["b1"], coefs["b2"], coefs["b3"]))
+  standardized_residuals <- residuals / daily_volatility
+  
+  return(standardized_residuals)
+}
+
+# Calculate standardized residuals for all cities
+faro_std_residuals <- calculate_standardized_residuals(Faro_stochastic, faro_residuals, faro_volatility)
+tavira_std_residuals <- calculate_standardized_residuals(Tavira_stochastic, tavira_residuals, tavira_volatility)
+loule_std_residuals <- calculate_standardized_residuals(Loule_stochastic, loule_residuals, loule_volatility)
+
+# Create ACF plots of standardized residuals (Figure 10)
+plot_std_residuals_acf <- function(std_residuals, city_name, filename) {
+  png(filename, width = 800, height = 400, res = 150)
+  acf(std_residuals, main = "", lag.max = 40, col = "black", lwd = 2)
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create ACF plots for all cities
+plot_std_residuals_acf(faro_std_residuals, "Faro", "faro_std_residuals_acf.png")
+plot_std_residuals_acf(tavira_std_residuals, "Tavira", "tavira_std_residuals_acf.png")
+plot_std_residuals_acf(loule_std_residuals, "Loulé", "loule_std_residuals_acf.png")
+
+# Create ACF plots of squared standardized residuals (Figure 11)
+plot_sq_std_residuals_acf <- function(std_residuals, city_name, filename) {
+  png(filename, width = 800, height = 400, res = 150)
+  acf(std_residuals^2, main = "", lag.max = 40, col = "black", lwd = 2)
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create ACF plots for all cities
+plot_sq_std_residuals_acf(faro_std_residuals, "Faro", "faro_sq_std_residuals_acf.png")
+plot_sq_std_residuals_acf(tavira_std_residuals, "Tavira", "tavira_sq_std_residuals_acf.png")
+plot_sq_std_residuals_acf(loule_std_residuals, "Loulé", "loule_sq_std_residuals_acf.png")
+
+# Create density plots of standardized residuals (Figure 9)
+plot_std_residuals_density <- function(std_residuals, city_name, filename) {
+  png(filename, width = 600, height = 400, res = 150)
+  plot(density(std_residuals), main = "", xlab = "", ylab = "", col = "black", lwd = 2)
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create density plots for all cities
+plot_std_residuals_density(faro_std_residuals, "Faro", "faro_std_residuals_density.png")
+plot_std_residuals_density(tavira_std_residuals, "Tavira", "tavira_std_residuals_density.png")
+plot_std_residuals_density(loule_std_residuals, "Loulé", "loule_std_residuals_density.png")
+
+# Fit skewed normal distribution
+fit_skewed_normal <- function(std_residuals, city_name) {
+  sn_fit <- selm(std_residuals ~ 1, family = "SN")
+  dp <- sn_fit@param$dp
+  cp <- sn_fit@param$cp
+  
+  return(list(
+    fit = sn_fit,
+    dp = dp,
+    cp = cp
+  ))
+}
+
+# Fit skewed normal distribution for all cities
+faro_sn_fit <- fit_skewed_normal(faro_std_residuals, "Faro")
+tavira_sn_fit <- fit_skewed_normal(tavira_std_residuals, "Tavira")
+loule_sn_fit <- fit_skewed_normal(loule_std_residuals, "Loulé")
+
+# Create skewed normal distribution fits (Figure 12)
+plot_skewed_normal_fit <- function(std_residuals, sn_fit, city_name, filename) {
+  png(filename, width = 600, height = 400, res = 150)
+  
+  # Plot empirical density
+  dens <- density(std_residuals)
+  plot(dens, main = "", xlab = "", ylab = "", col = "black", lwd = 2,
+       ylim = c(0, max(dens$y) * 1.1))
+  
+  # Add fitted skewed normal distribution
+  x <- seq(min(std_residuals), max(std_residuals), length = 1000)
+  lines(x, dsn(x, dp = sn_fit$dp), col = "red", lwd = 2)
+  
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create skewed normal fit plots for all cities
+plot_skewed_normal_fit(faro_std_residuals, faro_sn_fit, "Faro", "faro_skewed_normal_fit.png")
+plot_skewed_normal_fit(tavira_std_residuals, tavira_sn_fit, "Tavira", "tavira_skewed_normal_fit.png")
+plot_skewed_normal_fit(loule_std_residuals, loule_sn_fit, "Loulé", "loule_skewed_normal_fit.png")
+
+# Summary tables only (no plots)
+cat("\n=== STANDARDIZED RESIDUALS PROPERTIES ===\n")
+std_residuals_summary <- data.frame(
+  City = c("Faro", "Tavira", "Loulé"),
+  Mean = c(mean(faro_std_residuals), mean(tavira_std_residuals), mean(loule_std_residuals)),
+  SD = c(sd(faro_std_residuals), sd(tavira_std_residuals), sd(loule_std_residuals)),
+  Shapiro_p = c(
+    shapiro.test(faro_std_residuals)$p.value,
+    shapiro.test(tavira_std_residuals)$p.value,
+    shapiro.test(loule_std_residuals)$p.value
+  )
+)
+
+print(std_residuals_summary)
+
+cat("\n=== SKEWED NORMAL DISTRIBUTION PARAMETERS ===\n")
+skewed_normal_summary <- data.frame(
+  City = c("Faro", "Tavira", "Loulé"),
+  Location_ξ = c(faro_sn_fit$dp[1], tavira_sn_fit$dp[1], loule_sn_fit$dp[1]),
+  Scale_ω = c(faro_sn_fit$dp[2], tavira_sn_fit$dp[2], loule_sn_fit$dp[2]),
+  Shape_α = c(faro_sn_fit$dp[3], tavira_sn_fit$dp[3], loule_sn_fit$dp[3])
+)
+
+print(skewed_normal_summary)
+
+# Create combined plot with histogram and fitted skewed normal distribution
+plot_histogram_with_fit <- function(std_residuals, sn_fit, city_name, filename) {
+  png(filename, width = 600, height = 400, res = 150)
+  
+  # Create histogram
+  hist(std_residuals, main = "", xlab = "", ylab = "", col = "lightgray", 
+       border = "black", freq = FALSE, breaks = 30)
+  
+  # Add fitted skewed normal distribution
+  x <- seq(min(std_residuals), max(std_residuals), length = 1000)
+  lines(x, dsn(x, dp = sn_fit$dp), col = "red", lwd = 2)
+  
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Create combined plots for all cities
+plot_histogram_with_fit(faro_std_residuals, faro_sn_fit, "Faro", "faro_histogram_with_fit.png")
+plot_histogram_with_fit(tavira_std_residuals, tavira_sn_fit, "Tavira", "tavira_histogram_with_fit.png")
+plot_histogram_with_fit(loule_std_residuals, loule_sn_fit, "Loulé", "loule_histogram_with_fit.png")
