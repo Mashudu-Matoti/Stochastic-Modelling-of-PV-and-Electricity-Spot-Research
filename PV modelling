@@ -1,0 +1,267 @@
+# Install and load required packages
+install.packages("tidyverse")
+install.packages("tseries")
+install.packages("moments")  # For skewness and kurtosis
+
+
+
+
+library(tseries)
+library(readxl)
+library(tidyr)
+library(tidyverse)
+library(moments)
+library(dplyr)
+library(lubridate)
+
+#for sun intensity
+library(readxl)
+library(dplyr)
+library(nlstools)
+install.packages('nlstools')
+
+# Set working directory
+getwd()
+setwd("C:\\Users\\scofi\\Documents\\RStats")
+
+# Load the Portugal PV data
+portugal_file = "Portugal.xlsx"
+sheet_names = excel_sheets(portugal_file)
+sheet_names
+
+# Read all sheets into a list
+data_list_lapply = lapply(sheet_names, function(x) read_excel(portugal_file, sheet = x))
+names(data_list_lapply) = sheet_names
+
+# Extract individual city data
+Faro = data_list_lapply[["Faro"]]
+Tavira = data_list_lapply[["Tavira"]]
+Loule = data_list_lapply[["Loule"]]
+
+# View the structure of data
+str(Faro)
+str(Tavira)
+str(Loule)
+
+# Data Cleaning - Handle missing values
+Faro_imputed <- Faro %>%
+  mutate(across(where(is.numeric), ~replace_na(.x, mean(.x, na.rm = TRUE))))
+
+Tavira_imputed <- Tavira %>%
+  mutate(across(where(is.numeric), ~replace_na(.x, mean(.x, na.rm = TRUE))))
+
+Loule_imputed <- Loule %>%
+  mutate(across(where(is.numeric), ~replace_na(.x, mean(.x, na.rm = TRUE))))
+
+# Function to calculate descriptive statistics
+calculate_stats <- function(data, city_name) {
+  # Assuming the PV production column is numeric - adjust column name as needed
+  # Replace 'PV_Production' with your actual column name containing PV data
+  pv_data <- data[[2]]  # Assuming PV data is in second column, adjust as needed
+  
+  stats <- list(
+    City = city_name,
+    Mean = mean(pv_data, na.rm = TRUE),
+    Median = median(pv_data, na.rm = TRUE),
+    Std_Dev = sd(pv_data, na.rm = TRUE),
+    Skewness = skewness(pv_data, na.rm = TRUE),
+    Kurtosis = kurtosis(pv_data, na.rm = TRUE),
+    Min = min(pv_data, na.rm = TRUE),
+    Max = max(pv_data, na.rm = TRUE),
+    SW_p_value = shapiro.test(pv_data)$p.value
+  )
+  return(stats)
+}
+
+# Calculate statistics for each city
+faro_stats <- calculate_stats(Faro_imputed, "Faro")
+tavira_stats <- calculate_stats(Tavira_imputed, "Tavira")
+loule_stats <- calculate_stats(Loule_imputed, "Loule")
+
+# Create summary table
+summary_table <- data.frame(
+  City = c(faro_stats$City, tavira_stats$City, loule_stats$City),
+  Mean = c(faro_stats$Mean, tavira_stats$Mean, loule_stats$Mean),
+  Median = c(faro_stats$Median, tavira_stats$Median, loule_stats$Median),
+  Std_Dev = c(faro_stats$Std_Dev, tavira_stats$Std_Dev, loule_stats$Std_Dev),
+  Skewness = c(faro_stats$Skewness, tavira_stats$Skewness, loule_stats$Skewness),
+  Kurtosis = c(faro_stats$Kurtosis, tavira_stats$Kurtosis, loule_stats$Kurtosis),
+  SW_p_value = c(faro_stats$SW_p_value, tavira_stats$SW_p_value, loule_stats$SW_p_value)
+)
+
+print(summary_table)
+
+# Histograms with normal distribution curves
+par(mfrow = c(2, 2))
+
+# Faro histogram
+x_faro = Faro_imputed[[2]]  # Adjust column index as needed
+hist(x_faro, breaks = 30, probability = TRUE, 
+     col = "lightblue", border = "white",
+     main = "Faro PV Production",
+     xlab = "PV Production")
+mean_faro <- mean(x_faro, na.rm = TRUE)
+sd_faro <- sd(x_faro, na.rm = TRUE)
+curve(dnorm(x, mean = mean_faro, sd = sd_faro), 
+      col = "red", lwd = 2, add = TRUE)
+
+# Tavira histogram
+x_tavira = Tavira_imputed[[2]]  # Adjust column index as needed
+hist(x_tavira, breaks = 30, probability = TRUE, 
+     col = "lightblue", border = "white",
+     main = "Tavira PV Production",
+     xlab = "PV Production")
+mean_tavira <- mean(x_tavira, na.rm = TRUE)
+sd_tavira <- sd(x_tavira, na.rm = TRUE)
+curve(dnorm(x, mean = mean_tavira, sd = sd_tavira), 
+      col = "red", lwd = 2, add = TRUE)
+
+# Loule histogram
+x_loule = Loule_imputed[[2]]  # Adjust column index as needed
+hist(x_loule, breaks = 30, probability = TRUE, 
+     col = "lightblue", border = "white",
+     main = "Loule PV Production",
+     xlab = "PV Production")
+mean_loule <- mean(x_loule, na.rm = TRUE)
+sd_loule <- sd(x_loule, na.rm = TRUE)
+curve(dnorm(x, mean = mean_loule, sd = sd_loule), 
+      col = "red", lwd = 2, add = TRUE)
+
+# Time series plots
+par(mfrow = c(3, 1))
+plot(ts(Faro_imputed[[2]]),col= 'blue', main = "Faro PV Production", ylab = "PV Production")
+plot(ts(Tavira_imputed[[2]]),col='blue', main = "Tavira PV Production", ylab = "PV Production")
+plot(ts(Loule_imputed[[2]]), col='blue' ,main = "Loule PV Production", ylab = "PV Production")
+
+# Stationarity tests
+suppressWarnings(adf.test(Faro_imputed[[2]]))
+suppressWarnings(adf.test(Tavira_imputed[[2]]))
+suppressWarnings(adf.test(Loule_imputed[[2]]))
+
+
+# Load required packages
+
+
+# Create a helper function to generate and save plots
+save_city_plots <- function(data, city_name, freq = 365) {
+  
+  # Convert to time series
+  PV_ts <- ts(data$PV, frequency = freq)
+  
+  # Deseasonalise
+  stl_fit <- stl(PV_ts, s.window = "periodic")
+  PV_deseason <- seasadj(stl_fit)
+  
+  # Test stationarity
+  adf_result <- adf.test(PV_deseason)
+  if (adf_result$p.value > 0.05) {
+    PV_final <- diff(PV_deseason)
+  } else {
+    PV_final <- PV_deseason
+  }
+  
+  # --- Save Original plot ---
+  png(filename = paste0(city_name, "_Original.png"), width = 600, height = 400)
+  plot(PV_ts, col = "blue", main = paste(city_name, ": Original PV"), ylab = "PV Production")
+  dev.off()
+  
+  # --- Save ACF plot ---
+  png(filename = paste0(city_name, "_ACF.png"), width = 600, height = 400)
+  acf(PV_final, main = paste(city_name, ": ACF of Deseasonalised PV"))
+  dev.off()
+  
+  # --- Save PACF plot ---
+  png(filename = paste0(city_name, "_PACF.png"), width = 600, height = 400)
+  pacf(PV_final, main = paste(city_name, ": PACF of Deseasonalised PV"))
+  dev.off()
+  
+  cat(city_name, "plots saved successfully!\n")
+}
+
+# --- Run for all three cities ---
+save_city_plots(Faro_imputed, "Faro")
+save_city_plots(Tavira_imputed, "Tavira")
+save_city_plots(Loule_imputed, "Loule")
+
+
+
+# ACF plots
+par(mfrow = c(2, 2))
+acf(Faro_imputed[[2]], 50, main = "Faro ACF")
+acf(Tavira_imputed[[2]], 50, main = "Tavira ACF")
+acf(Loule_imputed[[2]], 50, main = "Loule ACF")
+
+# PACF plots
+pacf(Faro_imputed[[2]], 50, main = "Faro PACF")
+pacf(Tavira_imputed[[2]], 50, main = "Tavira PACF")
+pacf(Loule_imputed[[2]], 50, main = "Loule PACF")
+
+
+
+fit_seasonal <- function(city_data, city_name, latitude) {
+  
+  PV_data <- city_data %>%
+    mutate(PV = as.numeric(PV)) %>%
+    filter(PV > 0 & !is.na(PV))  # remove zeros/NA
+  
+  # Create DayOfYear from actual dates
+  PV_data <- PV_data %>%
+    mutate(
+      Date = as.Date(Date),             # make sure you have a Date column
+      n = yday(Date),                   # Day of the year, 1-365/366
+      LST = 12,
+      delta = 23.45 * sin((360/365)*(284+n)*pi/180), # declination
+      omega = 15*(LST-12),              # hour angle
+      theta = acos(cos(latitude*pi/180)*cos(delta*pi/180)*cos(omega*pi/180) +
+                     sin(latitude*pi/180)*sin(delta*pi/180)) * 180/pi,  # zenith
+      AM = 1 / (cos(theta*pi/180) + 0.50572*(96.07995 - theta)^(-1.6364)), # air mass
+      I = 1.353 * 0.7 * AM^0.678,      # sun intensity
+      logPV = log(PV)
+    )
+  
+  # Fit linear model
+  lm_model <- lm(logPV ~ n + log(I), data = PV_data)
+  
+  # Predicted PV
+  PV_data$PV_pred <- exp(predict(lm_model))
+  
+  # Plot observed vs predicted
+  plot(PV_data$PV, PV_data$PV_pred,
+       xlab = "Observed PV", ylab = "Predicted PV",
+       main = paste("Observed vs Predicted PV -", city_name),
+       col = "blue", pch = 16)
+  abline(0,1,col="red", lwd=2)
+  
+  return(list(model = lm_model, data = PV_data))
+}
+
+# Example for Faro
+Faro_fit <- fit_seasonal(Faro_imputed, "Faro", 37.0194)
+Tavira_fit <- fit_seasonal(Tavira_imputed, "Tavira", 37.1259)
+Loule_fit <- fit_seasonal(Loule_imputed, "Loule", 37.1376)
+
+# Faro summary
+summary(Faro_fit$model)
+
+# Tavira summary
+summary(Tavira_fit$model)
+
+# Loule summary
+summary(Loule_fit$model)
+
+
+# Extract coefficients
+Faro_coef <- coef(Faro_fit$model)
+Tavira_coef <- coef(Tavira_fit$model)
+Loule_coef <- coef(Loule_fit$model)
+
+# Combine into a summary table
+summary_table <- data.frame(
+  City = c("Faro", "Tavira", "Loule"),
+  a_hat = c(Faro_coef["(Intercept)"], Tavira_coef["(Intercept)"], Loule_coef["(Intercept)"]),
+  b_hat = c(Faro_coef["n"], Tavira_coef["n"], Loule_coef["n"]),
+  c_hat = c(Faro_coef["log(I)"], Tavira_coef["log(I)"], Loule_coef["log(I)"])
+)
+
+summary_table
+
